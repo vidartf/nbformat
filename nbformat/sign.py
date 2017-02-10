@@ -137,6 +137,7 @@ class SQLiteSignatureStore(SignatureStore, LoggingConfigurable):
         self.db = self._connect_db(db_file)
 
     def _connect_db(self, db_file):
+        db = None
         kwargs = dict(
             detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
         try:
@@ -145,6 +146,8 @@ class SQLiteSignatureStore(SignatureStore, LoggingConfigurable):
         except (sqlite3.DatabaseError, sqlite3.OperationalError):
             if db_file != ':memory:':
                 old_db_location = db_file + ".bak"
+                if db is not None:
+                    db.close()
                 self.log.warn(
                     ("The signatures database cannot be opened; maybe it is corrupted or encrypted. "
                      "You may need to rerun your notebooks to ensure that they are trusted to run Javascript. "
@@ -240,7 +243,7 @@ class SQLiteSignatureStore(SignatureStore, LoggingConfigurable):
 
 def yield_everything(obj):
     """Yield every item in a container as bytes
-    
+
     Allows any JSONable object to be passed to an HMAC digester
     without having to serialize the whole thing.
     """
@@ -261,7 +264,7 @@ def yield_everything(obj):
 
 def yield_code_cells(nb):
     """Iterator that yields all cells in a notebook
-    
+
     nbformat version independent
     """
     if nb.nbformat >= 4:
@@ -277,7 +280,7 @@ def yield_code_cells(nb):
 @contextmanager
 def signature_removed(nb):
     """Context manager for operating on a notebook with its signature removed
-    
+
     Used for excluding the previous signature when computing a notebook's signature.
     """
     save_signature = nb['metadata'].pop('signature', None)
@@ -290,7 +293,7 @@ def signature_removed(nb):
 
 class NotebookNotary(LoggingConfigurable):
     """A class for computing and verifying notebook signatures."""
-    
+
     data_dir = Unicode()
     @default('data_dir')
     def _data_dir_default(self):
@@ -330,19 +333,19 @@ class NotebookNotary(LoggingConfigurable):
         if not self.data_dir:
             return ':memory:'
         return os.path.join(self.data_dir, u'nbsignatures.db')
-    
+
     algorithm = Enum(algorithms, default_value='sha256',
         help="""The hashing algorithm used to sign notebooks."""
     ).tag(config=True)
     @observe('algorithm')
     def _algorithm_changed(self, change):
         self.digestmod = getattr(hashlib, change.new)
-    
+
     digestmod = Any()
     @default('digestmod')
     def _digestmod_default(self):
         return getattr(hashlib, self.algorithm)
-    
+
     secret_file = Unicode(
         help="""The file where the secret key is stored."""
     ).tag(config=True)
@@ -351,7 +354,7 @@ class NotebookNotary(LoggingConfigurable):
         if not self.data_dir:
             return ''
         return os.path.join(self.data_dir, 'notebook_secret')
-    
+
     secret = Bytes(
         help="""The secret key with which notebooks are signed."""
     ).tag(config=True)
@@ -369,7 +372,7 @@ class NotebookNotary(LoggingConfigurable):
     def __init__(self, **kwargs):
         super(NotebookNotary, self).__init__(**kwargs)
         self.store = self.store_factory()
-    
+
     def _write_secret_file(self, secret):
         """write my secret to my secret_file"""
         self.log.info("Writing notebook-signing key to %s", self.secret_file)
@@ -383,10 +386,10 @@ class NotebookNotary(LoggingConfigurable):
                 self.secret_file
             )
         return secret
-    
+
     def compute_signature(self, nb):
         """Compute a notebook's signature
-        
+
         by hashing the entire contents of the notebook via HMAC digest.
         """
         hmac = HMAC(self.secret, digestmod=self.digestmod)
@@ -395,17 +398,17 @@ class NotebookNotary(LoggingConfigurable):
             # sign the whole thing
             for b in yield_everything(nb):
                 hmac.update(b)
-        
+
         return hmac.hexdigest()
-    
+
     def check_signature(self, nb):
         """Check a notebook's stored signature
-        
+
         If a signature is stored in the notebook's metadata,
         a new signature is computed and compared with the stored value.
-        
+
         Returns True if the signature is found and matches, False otherwise.
-        
+
         The following conditions must all be met for a notebook to be trusted:
         - a signature is stored in the form 'scheme:hexdigest'
         - the stored scheme matches the requested scheme
@@ -416,54 +419,54 @@ class NotebookNotary(LoggingConfigurable):
             return False
         signature = self.compute_signature(nb)
         return self.store.check_signature(signature, self.algorithm)
-    
+
     def sign(self, nb):
         """Sign a notebook, indicating that its output is trusted on this machine
-        
+
         Stores hash algorithm and hmac digest in a local database of trusted notebooks.
         """
         if nb.nbformat < 3:
             return
         signature = self.compute_signature(nb)
         self.store.store_signature(signature, self.algorithm)
-    
+
     def unsign(self, nb):
         """Ensure that a notebook is untrusted
-        
+
         by removing its signature from the trusted database, if present.
         """
         signature = self.compute_signature(nb)
         self.store.remove_signature(signature, self.algorithm)
-    
+
     def mark_cells(self, nb, trusted):
         """Mark cells as trusted if the notebook's signature can be verified
-        
+
         Sets ``cell.metadata.trusted = True | False`` on all code cells,
         depending on whether the stored signature can be verified.
-        
+
         This function is the inverse of check_cells
         """
         if nb.nbformat < 3:
             return
-        
+
         for cell in yield_code_cells(nb):
             cell['metadata']['trusted'] = trusted
-    
+
     def _check_cell(self, cell, nbformat_version):
         """Do we trust an individual cell?
-        
+
         Return True if:
-        
+
         - cell is explicitly trusted
         - cell has no potentially unsafe rich output
-        
+
         If a cell has no output, or only simple print statements,
         it will always be trusted.
         """
         # explicitly trusted
         if cell['metadata'].pop("trusted", False):
             return True
-        
+
         # explicitly safe output
         if nbformat_version >= 4:
             unsafe_output_types = ['execute_result', 'display_data']
@@ -471,7 +474,7 @@ class NotebookNotary(LoggingConfigurable):
         else: # v3
             unsafe_output_types = ['pyout', 'display_data']
             safe_keys = {"output_type", "prompt_number", "metadata"}
-        
+
         for output in cell['outputs']:
             output_type = output['output_type']
             if output_type in unsafe_output_types:
@@ -479,14 +482,14 @@ class NotebookNotary(LoggingConfigurable):
                 output_keys = set(output)
                 if output_keys.difference(safe_keys):
                     return False
-        
+
         return True
-    
+
     def check_cells(self, nb):
         """Return whether all code cells are trusted
-        
+
         If there are no code cells, return True.
-        
+
         This function is the inverse of mark_cells.
         """
         if nb.nbformat < 3:
@@ -515,31 +518,31 @@ class TrustNotebookApp(JupyterApp):
     version = __version__
     description="""Sign one or more Jupyter notebooks with your key,
     to trust their dynamic (HTML, Javascript) output.
-    
+
     Otherwise, you will have to re-execute the notebook to see output.
     """
     # This command line tool should use the same config file as the notebook
     @default('config_file_name')
     def _config_file_name_default(self):
         return 'jupyter_notebook_config'
-    
+
     examples = """
     jupyter trust mynotebook.ipynb and_this_one.ipynb
     """
-    
+
     flags = trust_flags
-    
+
     reset = Bool(False,
         help="""If True, delete the trusted signature cache.
         After reset, all previously signed notebooks will become untrusted.
         """
     ).tag(config=True)
-    
+
     notary = Instance(NotebookNotary)
     @default('notary')
     def _notary_default(self):
         return NotebookNotary(parent=self, data_dir=self.data_dir)
-    
+
     def sign_notebook_file(self, notebook_path):
         """Sign a notebook from the filesystem"""
         if not os.path.exists(notebook_path):
@@ -548,7 +551,7 @@ class TrustNotebookApp(JupyterApp):
         with io.open(notebook_path, encoding='utf8') as f:
             nb = read(f, NO_CONVERT)
         self.sign_notebook(nb, notebook_path)
-    
+
     def sign_notebook(self, nb, notebook_path='<stdin>'):
         """Sign a notebook that's been loaded"""
         if self.notary.check_signature(nb):
@@ -556,12 +559,12 @@ class TrustNotebookApp(JupyterApp):
         else:
             print("Signing notebook: %s" % notebook_path)
             self.notary.sign(nb)
-    
+
     def generate_new_key(self):
         """Generate a new notebook signature key"""
         print("Generating new notebook key: %s" % self.notary.secret_file)
         self.notary._write_secret_file(os.urandom(1024))
-    
+
     def start(self):
         if self.reset:
             if os.path.exists(self.notary.db_file):
